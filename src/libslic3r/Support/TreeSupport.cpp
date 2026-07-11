@@ -3652,8 +3652,23 @@ void fff_tree_support_generate(PrintObject &print_object, std::function<void()> 
             break;
         ++idx;
     }
-    FFFTreeSupport::generate_support_areas(*print_object.print(), 
-        BuildVolume(Pointfs{ Vec2d{ -300., -300. }, Vec2d{ -300., +300. }, Vec2d{ +300., +300. }, Vec2d{ +300., -300. } }, 0.), { idx }, 
+    const PrintConfig &print_config = print_object.print()->config();
+    // PrintObject's own layers (Layer::lslices), and thus everything tree/organic supports
+    // compute from them, are stored in the object's local working coordinates, not the bed's
+    // absolute world coordinates - nothing in this file ever references PrintInstance::shift.
+    // Each instance's `shift` maps local -> world ("shift of this instance's center into the
+    // world coordinates", see PrintInstance in Print.hpp). Express the bed polygon in that same
+    // local frame (by subtracting the reference instance's shift) so the machine border lines up
+    // with where the object's own geometry actually is, instead of comparing local object
+    // coordinates directly against a world-space bed polygon.
+    Vec2d shift = Vec2d::Zero();
+    if (! print_object.instances().empty())
+        shift = unscaled<double>(print_object.instances().front().shift);
+    Pointfs bed_shape_local = print_config.bed_shape.values;
+    for (Vec2d &pt : bed_shape_local)
+        pt -= shift;
+    FFFTreeSupport::generate_support_areas(*print_object.print(),
+        BuildVolume(bed_shape_local, print_config.max_print_height.value), { idx },
         throw_on_cancel);
 }
 
