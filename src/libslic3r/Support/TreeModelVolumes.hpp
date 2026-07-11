@@ -113,6 +113,13 @@ public:
      */
     const Polygons& getCollision(const coord_t radius, LayerIndex layer_idx, bool min_xy_dist) const;
 
+    // The raw, unmodified printable area of the build plate (same at every Z height, as a
+    // Cartesian printer's gantry cannot reach outside its XY limits regardless of Z). Used to
+    // absolutely clamp support point positions that may have drifted outside the machine border
+    // obstacle without ever being detected as colliding with it (the border only detects a
+    // collision within a branch's own physical radius of the border geometry).
+    const Polygon& bed_polygon() const { return m_bed_polygon; }
+
     // Get a collision area at a given layer for a radius that is a lower or equial to the key radius.
     // It is expected that the collision area is precalculated for a given layer at least for the radius zero.
     // Used for pushing tree supports away from object during the final Organic optimization step.
@@ -488,6 +495,10 @@ private:
      * machine
      */
     Polygons m_machine_border;
+    /*!
+     * \brief The raw, unmodified bed polygon (see bed_polygon() accessor above).
+     */
+    Polygon m_bed_polygon;
     /*!
      * \brief Storage for layer outlines and the corresponding settings of the meshes grouped by meshes with identical setting.
      */

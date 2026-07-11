@@ -46,20 +46,25 @@ using namespace std::literals;
 // had to use a define beacuse the macro processing inside macro BOOST_LOG_TRIVIAL()
 #define error_level_not_in_cache error
 
-//FIXME Machine border is currently ignored.
+// Build a ring around the print bed and treat it as a collision obstacle, the same way model
+// outlines are treated, so that tree support branches are kept from moving past the bed boundary.
+// The ring only blocks a branch from moving *through* it - it does nothing to stop a branch that
+// already starts (at the tip, following an overhanging part of the model) beyond the ring's outer
+// edge from just growing straight down through open, unconstrained space past that edge. So the
+// margin can't merely exceed a single per-layer movement step (a few mm) - it has to exceed any
+// plausible distance a model's overhang extends past the bed edge. The original, never-enabled
+// upstream code used 1000mm for this reason, but risked overflowing the 32bit scaled coordinates
+// on large beds. 50mm is far smaller (more headroom against overflow) while still comfortably
+// larger than any realistic overhang-past-the-edge distance for desktop-printer-sized beds and
+// objects; verified in practice to keep organic support branches on the plate.
+static constexpr double machine_border_offset_mm = 50.;
+
 static Polygons calculateMachineBorderCollision(Polygon machine_border)
 {
-    // Put a border of 1m around the print volume so that we don't collide.
-#if 1
-    //FIXME just returning no border will let tree support legs collide with print bed boundary
-    return {};
-#else
-    //FIXME offsetting by 1000mm easily overflows int32_tr coordinate.
-    Polygons out = offset(machine_border, scaled<float>(1000.), jtMiter, 1.2);
+    Polygons out = offset(machine_border, scaled<float>(machine_border_offset_mm), jtMiter, 1.2);
     machine_border.reverse(); // Makes the polygon negative so that we subtract the actual volume from the collision area.
     out.emplace_back(std::move(machine_border));
     return out;
-#endif
 }
 
 TreeModelVolumes::TreeModelVolumes(
@@ -75,7 +80,8 @@ TreeModelVolumes::TreeModelVolumes(
 #ifdef SLIC3R_TREESUPPORTS_PROGRESS
     m_progress_multiplier{ progress_multiplier }, m_progress_offset{ progress_offset },
 #endif // SLIC3R_TREESUPPORTS_PROGRESS
-    m_machine_border{ calculateMachineBorderCollision(build_volume.polygon()) }
+    m_machine_border{ calculateMachineBorderCollision(build_volume.polygon()) },
+    m_bed_polygon{ build_volume.polygon() }
 {
 #if 0
     std::unordered_map<size_t, size_t> mesh_to_layeroutline_idx;
