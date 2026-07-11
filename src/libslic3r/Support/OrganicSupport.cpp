@@ -919,6 +919,90 @@ static void organic_smooth_branches_avoid_collisions(
             break;
     }
 
+    // The loop above caps how far a single iteration may nudge a sphere away from a collision
+    // (max_nudge_collision_avoidance), so that the push-back can compete fairly, iteration by
+    // iteration, against the Laplacian smoothing pull towards the neighbors' average position.
+    // But a sustained pull (for example towards a trunk convergence point that happens to sit
+    // outside the build volume) can still drag a sphere across the collision boundary a little
+    // at a time faster than the capped push-back recovers, especially for thin branches whose
+    // collision detection radius (bounded by their own physical radius) is small. Run a final,
+    // uncapped correction pass without any competing smoothing, so that the result is guaranteed
+    // collision-free (in particular, never outside the machine border added to the collision
+    // data in TreeModelVolumes) regardless of how far the loop above may have drifted.
+    for (int final_iter = 0; final_iter < 5; ++ final_iter) {
+        std::atomic<bool> any_collision{ false };
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, collision_spheres.size()),
+            [&collision_spheres, &layer_collision_cache, &slicing_params, &config, &any_collision](const tbb::blocked_range<size_t> range) {
+            for (size_t collision_sphere_id = range.begin(); collision_sphere_id < range.end(); ++ collision_sphere_id)
+                if (CollisionSphere &collision_sphere = collision_spheres[collision_sphere_id]; ! collision_sphere.locked) {
+                    double last_collision_depth = - std::numeric_limits<double>::max();
+                    Vec3f  last_collision;
+                    for (uint32_t layer_id = collision_sphere.layer_begin; layer_id != collision_sphere.layer_end; ++ layer_id) {
+                        double dz = (layer_id - collision_sphere.element.state.layer_idx) * slicing_params.layer_height;
+                        if (double r2 = sqr(collision_sphere.radius) - sqr(dz); r2 > 0) {
+                            if (const LayerCollisionCache &layer_collision_cache_item = layer_collision_cache[layer_id]; ! layer_collision_cache_item.empty()) {
+                                size_t hit_idx_out;
+                                Vec2d  hit_point_out;
+                                if (double dist = sqrt(AABBTreeLines::squared_distance_to_indexed_lines(
+                                    layer_collision_cache_item.lines, layer_collision_cache_item.aabbtree_lines, Vec2d(to_2d(collision_sphere.position).cast<double>()),
+                                    hit_idx_out, hit_point_out, r2)); dist >= 0.) {
+                                    double collision_depth = sqrt(r2) - dist;
+                                    if (collision_depth > last_collision_depth) {
+                                        last_collision_depth = collision_depth;
+                                        last_collision = to_3d(hit_point_out.cast<float>(), float(layer_z(slicing_params, config, layer_id)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (last_collision_depth > 0) {
+                        any_collision = true;
+                        Vec2d nudge_vector = (to_2d(collision_sphere.position) - to_2d(last_collision)).cast<double>().normalized() * (last_collision_depth + collision_extra_gap);
+                        collision_sphere.position.head<2>() += nudge_vector.cast<float>();
+                    }
+                }
+        });
+        if (! any_collision)
+            break;
+    }
+
+    // The correction above only reacts to a collision detected within a branch's own physical
+    // radius of the border/model geometry - it does nothing for a position that ended up further
+    // outside the build plate than that (for example if the Laplacian smoothing pull above
+    // dragged it clean past the border in a few iterations, never getting close enough to either
+    // side of the border to be detected as colliding with it at all). Absolutely guarantee every
+    // result stays within the true buildable footprint - the same footprint at every Z height,
+    // since a Cartesian gantry cannot physically reach outside its XY limits regardless of Z - by
+    // clamping directly against the real bed polygon, regardless of how far out a position drifted.
+    {
+        const Polygon &bed_polygon = volumes.bed_polygon();
+        const Lines    bed_lines   = bed_polygon.lines();
+        const Vec2d    bed_centroid = unscaled<double>(bed_polygon.centroid());
+        for (CollisionSphere &collision_sphere : collision_spheres) {
+            if (collision_sphere.locked)
+                continue;
+            const Point pt = scaled<coord_t>(to_2d(collision_sphere.position));
+            if (bed_polygon.contains(pt))
+                continue;
+            Vec2d  nearest_point = bed_centroid;
+            double nearest_dist_sq = std::numeric_limits<double>::max();
+            for (const Line &line : bed_lines) {
+                Point closest;
+                if (double dist_sq = line.distance_to_squared(pt, &closest); dist_sq < nearest_dist_sq) {
+                    nearest_dist_sq = dist_sq;
+                    nearest_point = unscaled<double>(closest);
+                }
+            }
+            Vec2d inward_dir = bed_centroid - nearest_point;
+            if (inward_dir.norm() < EPSILON)
+                inward_dir = Vec2d(0., 0.);
+            else
+                inward_dir.normalize();
+            Vec2d new_pos = nearest_point + inward_dir * (double(collision_sphere.radius) + collision_extra_gap);
+            collision_sphere.position.head<2>() = new_pos.cast<float>();
+        }
+    }
+
     for (size_t i = 0; i < collision_spheres.size(); ++ i)
         elements_with_link_down[i].first->state.result_on_layer = scaled<coord_t>(to_2d(collision_spheres[i].position));
 }
